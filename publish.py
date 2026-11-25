@@ -8,7 +8,7 @@ Both are public and read in place by browsers (CORS + HTTP Range), e.g. by DuckD
 Usage: python3 publish.py     (after bus.py, mtr.py hk and search.py)"""
 import glob, json, os, tempfile
 import duckdb
-from huggingface_hub import HfApi, batch_bucket_files, create_bucket, sync_bucket
+from huggingface_hub import CommitOperationAdd, HfApi, batch_bucket_files, create_bucket, sync_bucket
 import manifest, sources
 
 REPO = 'milleleaf/hk-transit'
@@ -29,7 +29,7 @@ def main():
                                       'mtr_stations': sum(len(x['stations']) for x in mtr['lines']), 'stops': n('stops.parquet'),
                                       'routes': n('routes.parquet')}, built)
     manifest.gate(m, f'https://huggingface.co/buckets/{REPO}/resolve/manifest.json')
-    mf = os.path.join(hk, 'manifest.json'); json.dump(m, open(mf, 'w'), indent=1)
+    mf = os.path.join(hk, 'manifest.json')
     api = HfApi()
     api.create_repo(REPO, repo_type='dataset', exist_ok=True)
     sd = os.path.join(hk, 'search')
@@ -37,12 +37,14 @@ def main():
     api.upload_folder(repo_id=REPO, repo_type='dataset', folder_path=sd, path_in_repo='search', allow_patterns=['*.parquet'],
                       commit_message=f'search: bake of {built}')
     with tempfile.TemporaryDirectory() as t:     # the local search.duckdb names build paths (the GIS page); the dataset's names hf://
-        db = os.path.join(t, 'search.duckdb'); dataset_views(db)
-        api.upload_file(path_or_fileobj=db, path_in_repo='search/search.duckdb', repo_id=REPO, repo_type='dataset',
-                        commit_message=f'search.duckdb: views over hf://datasets/{REPO}/search/')
+        db = os.path.join(t, 'search.duckdb'); dataset_views(db)    # needs the parquet above online, so it is built after them
+        # the manifest must hash the file that is uploaded, not the local one: replace its entry, then ship db + manifest in ONE commit
+        m['files']['search/search.duckdb'] = {'sha256': manifest.sha256(db), 'bytes': os.path.getsize(db)}
+        json.dump(m, open(mf, 'w'), indent=1)
+        api.create_commit(REPO, repo_type='dataset', commit_message=f'search.duckdb (views over hf://datasets/{REPO}/search/) and manifest',
+                          operations=[CommitOperationAdd('search/search.duckdb', db), CommitOperationAdd('manifest.json', mf)])
     api.upload_file(path_or_fileobj=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hf', 'README.md'),
                     path_in_repo='README.md', repo_id=REPO, repo_type='dataset', commit_message='card')
-    api.upload_file(path_or_fileobj=mf, path_in_repo='manifest.json', repo_id=REPO, repo_type='dataset', commit_message='manifest')
     create_bucket(REPO, private=False, exist_ok=True)
     sync_bucket(os.path.join(hk, 'bus'), f'hf://buckets/{REPO}/bus', delete=True, quiet=True)
     batch_bucket_files(REPO, add=[(os.path.join(hk, 'mtr.json'), 'mtr.json'), (mf, 'manifest.json')])   # the manifest last: the gate reads it
