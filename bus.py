@@ -38,6 +38,7 @@ HK_ROADS_REV = '8bd67eb0d44be86329f52e08129b92667b52b303'
 TILE, STEP, X0, Y0 = 2000, 20, 800000, 800000
 SNAP_M, LEVEL_M = 40, 12                       # a stop further than SNAP_M from its line is a mismatch; level search radius
 CTB_PER_S = 5
+KMB_403 = 8                                     # KMB's bulk lists: 403s tolerated, 30 s apart (see get)
 MAX_OFF = 0.02                                  # the bake stops when more drawn route directions than this have their stops off the line
 NO_LEVEL = -9
 TO_HK, TO_LL = Transformer.from_crs(4326, 2326, always_xy=True), Transformer.from_crs(2326, 4326, always_xy=True)
@@ -51,22 +52,28 @@ class Pace:
         with self.lock: now = time.monotonic(); at = max(self.next, now); self.next = at + self.gap
         time.sleep(max(0.0, at - now))
 
-def get(url, pace=None):
-    for attempt in range(4):
+def get(url, pace=None, tries403=1):
+    """tries403: how many 403s end the bake. KMB's bulk lists answer 403 to about half of the requests at random (measured 2026-11-25:
+    5 of 9, from a Mac and from the runners alike), so those calls wait 30 s and ask again; every other call stops at the first 403."""
+    n403 = 0
+    for attempt in range(4 + tries403):
         if pace: pace.wait()
         try:
             with urllib.request.urlopen(url, timeout=120) as r: return json.loads(r.read().decode('utf-8-sig'))
         except urllib.error.HTTPError as e:
-            if e.code == 403: raise SystemExit(f'403 from {url}: blocked, stop and wait (see the docstring)')
-            if e.code == 404 or attempt == 3: raise
+            if e.code == 403:
+                n403 += 1
+                if n403 >= tries403: raise SystemExit(f'403 from {url}: blocked, stop and wait (see the docstring)')
+                print(f'403 from {url}, asking again in 30 s ({n403}/{tries403 - 1})', flush=True); time.sleep(30); continue
+            if e.code == 404 or attempt >= 3: raise
         except urllib.error.URLError:
-            if attempt == 3: raise
+            if attempt >= 3: raise
         time.sleep(2 ** attempt)
 
-def daily(name, url, pace=None):
+def daily(name, url, pace=None, tries403=1):
     p = os.path.join(C, DAY, name)
     if not os.path.exists(p):
-        os.makedirs(os.path.dirname(p), exist_ok=True); d = get(url, pace)
+        os.makedirs(os.path.dirname(p), exist_ok=True); d = get(url, pace, tries403)
         json.dump(d, open(p + '.part', 'w')); os.replace(p + '.part', p)
     return json.load(open(p, encoding='utf-8-sig'))                       # TD's GeoJSON starts with a BOM
 
@@ -95,9 +102,9 @@ def load():
     td = query_all(TD, {'where': "COMPANY_CODE LIKE '%KMB%' OR COMPANY_CODE LIKE '%LWB%' OR COMPANY_CODE LIKE '%CTB%'",
                         'outFields': 'ROUTE_NAMEE,ROUTE_SEQ,COMPANY_CODE', 'outSR': 2326, 'maxAllowableOffset': 1}, 'td-routes')
     gmb = query_all(GMB_LINES, {'where': '1=1', 'outFields': 'ROUTE_ID,ROUTE_SEQ,ROUTE_NAME,ED_STOP_NAMEE', 'outSR': 2326, 'maxAllowableOffset': 1}, 'gmb-routes')
-    stops = {s['stop']: {**s, 'co': 'KMB'} for s in daily('kmb-stop.json', f'{KMB}/stop')['data']}
+    stops = {s['stop']: {**s, 'co': 'KMB'} for s in daily('kmb-stop.json', f'{KMB}/stop', tries403=KMB_403)['data']}
     order = {}                                                           # (company, route or GMB id, bound) -> [(seq, stop id)]
-    for r in daily('kmb-route-stop.json', f'{KMB}/route-stop')['data']:
+    for r in daily('kmb-route-stop.json', f'{KMB}/route-stop', tries403=KMB_403)['data']:
         if r['service_type'] == '1': order.setdefault(('KMB', r['route'], r['bound']), []).append((int(r['seq']), r['stop']))
     ctb_pace = Pace(CTB_PER_S)
     ctb_dirs = sorted({(f['attributes']['ROUTE_NAMEE'], b) for f in td if 'CTB' in f['attributes']['COMPANY_CODE'] for b in 'OI'})
