@@ -6,7 +6,7 @@
 Nothing is uploaded unless the publish gate passes (manifest.py: no count drops > 10% against the published manifest).
 Both are public and read in place by browsers (CORS + HTTP Range), e.g. by DuckDB-Wasm and MapLibre.
 Usage: python3 publish.py     (after bus.py, mtr.py hk and search.py)"""
-import glob, json, os, tempfile
+import glob, json, os, shutil, tempfile
 import duckdb
 from huggingface_hub import CommitOperationAdd, HfApi, batch_bucket_files, create_bucket, sync_bucket
 import manifest, sources
@@ -43,6 +43,7 @@ def main():
         json.dump(m, open(mf, 'w'), indent=1)
         api.create_commit(REPO, repo_type='dataset', commit_message=f'search.duckdb (views over hf://datasets/{REPO}/search/) and manifest',
                           operations=[CommitOperationAdd('search/search.duckdb', db), CommitOperationAdd('manifest.json', mf)])
+        shutil.copyfile(db, os.path.join(sd, 'search.duckdb'))   # the Kaggle mirror uploads this folder: it must hold the file the manifest hashes
     api.upload_file(path_or_fileobj=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hf', 'README.md'),
                     path_in_repo='README.md', repo_id=REPO, repo_type='dataset', commit_message='card')
     create_bucket(REPO, private=False, exist_ok=True)
